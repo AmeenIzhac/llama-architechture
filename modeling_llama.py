@@ -1,25 +1,7 @@
-# coding=utf-8
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# imports only use pytorch and some python type libraries and relative imports
 from typing import Callable, List, Optional, Tuple, Union
 
-import torch
+import torch                                                               
 import torch.utils.checkpoint
 from torch import nn
 
@@ -55,13 +37,14 @@ logger = logging.get_logger(__name__)
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
 _CONFIG_FOR_DOC = "LlamaConfig"
 
-
+# root mean square normalization is an operation performed near the end of the transformer mechanism. 
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
         LlamaRMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
+
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
@@ -78,7 +61,7 @@ class LlamaRMSNorm(nn.Module):
 
 ALL_LAYERNORM_LAYERS.append(LlamaRMSNorm)
 
-
+# this class is used to create positional embeddings using a method called Rotary Position Embedding (RoPE)
 class LlamaRotaryEmbedding(nn.Module):
     def __init__(self, config: LlamaConfig, device=None):
         super().__init__()
@@ -139,14 +122,14 @@ class LlamaRotaryEmbedding(nn.Module):
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
-
+# helper to the below function
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
-
+# used to apply the rotary position embedding
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
 
@@ -173,7 +156,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
-
+# this is an operation performed near the end of the transformer mechanism in the feed forward network
 class LlamaMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -189,7 +172,9 @@ class LlamaMLP(nn.Module):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
-
+# in multi head attention if we have n heads then we get n query key and values embeddings for each token.
+# llama uses grouped query attention where we get n query embeddings but n / m key value embeddings where m is the number of key value groups.
+# this function is used to repeat the key value embeddings to match the number of query embeddings.
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -202,6 +187,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+# this function is provided with already calculated query key and value embeddings and it uses them to calculate the attention weights and the output of the attention mechanism.
 def eager_attention_forward(
     module: nn.Module,
     query: torch.Tensor,
@@ -228,6 +214,9 @@ def eager_attention_forward(
     return attn_output, attn_weights
 
 
+# this class implements the calculation of q k and v for multihead attention then hands to eager_attention_forward to do the multiplication. 
+# its quite seamless so u may not notice the head splitting.
+# it happens in the view(hidden_shape) eg value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -303,7 +292,7 @@ class LlamaAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
-
+# this class builds a full decoder layer ie adding the other steps after the attention eg mlp and norm
 class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
@@ -379,6 +368,7 @@ LLAMA_START_DOCSTRING = r"""
     "The bare LLaMA Model outputting raw hidden-states without any specific head on top.",
     LLAMA_START_DOCSTRING,
 )
+# some kind of wrapper class
 class LlamaPreTrainedModel(PreTrainedModel):
     config_class = LlamaConfig
     base_model_prefix = "model"
@@ -479,6 +469,7 @@ LLAMA_INPUTS_DOCSTRING = r"""
 """
 
 
+# this class builds the full model from embedding tokens, multiple decoder layers then norm and returns final layer hidden states outputs.
 @add_start_docstrings(
     "The bare LLaMA Model outputting raw hidden-states without any specific head on top.",
     LLAMA_START_DOCSTRING,
@@ -744,7 +735,9 @@ class LlamaModel(LlamaPreTrainedModel):
 
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
-
+# this takes the logits and projects them to vocab size (but not yet softmaxed)
+# this also has this GenerationMixin thing which is a mixin class that adds a generate method to the model.
+# GenerationMixin is a mixin in the transformers repo that adds generate and generation related methods since this functionality is the same for all / many models.
 class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     _tp_plan = {"lm_head": "colwise_rep"}
